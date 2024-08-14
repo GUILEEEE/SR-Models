@@ -139,17 +139,26 @@ def p2o(psf, shape):
         shape: [H, W]
 
     Returns:
-        otf: NxCxHxWx2
+        otf: NxCxHxW (complex tensor)
     '''
-    otf = torch.zeros(psf.shape[:-2] + shape).type_as(psf)
-    otf[...,:psf.shape[2],:psf.shape[3]].copy_(psf)
-    for axis, axis_size in enumerate(psf.shape[2:]):
-        otf = torch.roll(otf, -int(axis_size / 2), dims=axis+2)
-    otf = torch.rfft(otf, 2, onesided=False)
-    n_ops = torch.sum(torch.tensor(psf.shape).type_as(psf) * torch.log2(torch.tensor(psf.shape).type_as(psf)))
-    otf[..., 1][torch.abs(otf[..., 1]) < n_ops*2.22e-16] = torch.tensor(0).type_as(psf)
-    return otf
+    # Inicializar el OTF con ceros y copiar el PSF en el OTF
+    otf = torch.zeros(psf.shape[:-2] + shape, dtype=torch.complex64).type_as(psf)
+    otf[..., :psf.shape[2], :psf.shape[3]].copy_(psf)
 
+    # Ajustar el OTF para corregir el centrado del PSF
+    for axis, axis_size in enumerate(psf.shape[2:]):
+        otf = torch.roll(otf, -int(axis_size / 2), dims=axis + 2)
+
+    # Aplicar la FFT 2D al OTF
+    otf = torch.fft.rfft2(otf)
+
+    # Calcular n_ops para establecer un umbral en la eliminación de pequeñas componentes imaginarias
+    n_ops = torch.sum(torch.tensor(psf.shape, dtype=torch.float32) * torch.log2(torch.tensor(psf.shape, dtype=torch.float32)))
+
+    # Eliminar pequeñas componentes imaginarias debido a la precisión numérica
+    otf.imag[torch.abs(otf.imag) < n_ops * 2.22e-16] = 0
+
+    return otf
 
 def upsample(x, sf=3):
     '''s-fold upsampler
@@ -263,7 +272,7 @@ class DataNet(nn.Module):
         super(DataNet, self).__init__()
 
     def forward(self, x, FB, FBC, F2B, FBFy, alpha, sf):
-        FR = FBFy + torch.rfft(alpha*x, 2, onesided=False)
+        FR = FBFy + torch.fft.rfft2(alpha*x)
         x1 = cmul(FB, FR)
         FBR = torch.mean(splits(x1, sf), dim=-1, keepdim=False)
         invW = torch.mean(splits(F2B, sf), dim=-1, keepdim=False)
@@ -329,7 +338,7 @@ class USRNet(nn.Module):
         FBC = cconj(FB, inplace=False)
         F2B = r2c(cabs2(FB))
         STy = upsample(x, sf=sf)
-        FBFy = cmul(FBC, torch.rfft(STy, 2, onesided=False))
+        FBFy = cmul(FBC, torch.fft.rfft2(STy))
         x = nn.functional.interpolate(x, scale_factor=sf, mode='nearest')
 
         # hyper-parameter, alpha & beta
@@ -342,3 +351,4 @@ class USRNet(nn.Module):
             x = self.p(torch.cat((x, ab[:, i+self.n:i+self.n+1, ...].repeat(1, 1, x.size(2), x.size(3))), dim=1))
 
         return x
+
